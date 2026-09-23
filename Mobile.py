@@ -3,8 +3,9 @@
 """
 MLBB COMBINED BOT — Telegram Version (FINAL)
 Fitur:
-  🚀 BF Device Loop (max 10 device, unlimited loop)
+  🚀 BF Device Loop (max 10 device, unlimited loop) + Pause/Hapus
   📦 Bulk Detail Scan (akurat: skin, hero, level, rank)
+  🆔 GenDevID (generate and_ / ios_ 1-9999)
   📡 Status (ping, jitter, uptime)
   📢 Broadcast (khusus owner)
   🌐 Public access (wajib join channel)
@@ -23,6 +24,8 @@ import threading
 import asyncio
 import re
 import json
+import uuid
+import hashlib
 from enum import Enum
 from typing import Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -62,9 +65,11 @@ BF_HIT_FILE      = os.path.join(OUTPUT_DIR, "bf_device_hits.txt")
 BF_FAIL_FILE     = os.path.join(OUTPUT_DIR, "bf_device_fails.txt")
 BULK_DETAIL_FILE = os.path.join(OUTPUT_DIR, "HASIL_BULK_DEVID.txt")
 USERS_DB_FILE    = os.path.join(OUTPUT_DIR, "bot_users.json")
+GEN_DEVID_FILE   = os.path.join(OUTPUT_DIR, "generated_device_ids.txt")
 
 MAX_BULK_DEVICES = 500
 MAX_BF_DEVICES   = 10
+MAX_GEN_DEVICES  = 9999
 
 # ── DEVICE POOL ───────────────────────────────────────────────────────
 DEFAULT_DEVICE_IDS = [
@@ -108,7 +113,7 @@ BOT_START_DATETIME = datetime.datetime.now()
 
 
 # ══════════════════════════════════════════════════════════════════════
-# USER DATABASE (untuk broadcast & notifikasi startup)
+# USER DATABASE
 # ══════════════════════════════════════════════════════════════════════
 user_db_lock = threading.Lock()
 
@@ -203,6 +208,43 @@ def map_collector_point(point: int) -> str:
             roman = ["V", "IV", "III", "II", "I"][lvl]
             return f"{name} {roman}"
     return "Unknown"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# GEN DEVICE ID
+# ══════════════════════════════════════════════════════════════════════
+def _rand_hex(n: int) -> str:
+    return ''.join(random.choice("0123456789abcdef") for _ in range(n))
+
+
+def generate_one_device_id(platform: str = "and") -> str:
+    """
+    Format mengikuti pola DEFAULT_DEVICE_IDS:
+      and_<imei_md5 32 hex><android_id 16 hex><advertising_id 12 hex>-<uuid>
+    """
+    platform = platform.lower()
+    if platform not in ("and", "ios"):
+        platform = "and"
+
+    imei_md5   = _rand_hex(32)
+    android_id = _rand_hex(16)
+    ad_id      = _rand_hex(12)
+    tail       = str(uuid.uuid4())
+
+    return f"{platform}_{imei_md5}{android_id}{ad_id}-{tail}"
+
+
+def generate_device_ids(count: int, platform: str = "and", unique: bool = True) -> list:
+    seen = set()
+    out = []
+    for _ in range(count):
+        for _try in range(20):
+            d = generate_one_device_id(platform)
+            if not unique or d not in seen:
+                seen.add(d)
+                out.append(d)
+                break
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -845,6 +887,7 @@ def extract_device_ids_from_text(text: str):
 # TELEGRAM BOT
 # ══════════════════════════════════════════════════════════════════════
 WAITING_DEVICE_IDS, WAITING_THREADS = range(2)
+WAITING_GEN_COUNT, WAITING_GEN_PLATFORM = range(10, 12)
 WAITING_BROADCAST = 100
 
 USER_STATE = {}
@@ -854,16 +897,17 @@ HELP_TEXT = (
     "*Fitur:*\n"
     "• 🚀 *BF Device Loop* — max 10 device ID\n"
     "• 📦 *Bulk Detail Scan* — upload .txt → lihat skin/hero/level/rank\n"
+    "• 🆔 *GenDevID* — generate device id `and_` / `ios_` (1-9999)\n"
     "• 📡 *Status* — ping, jitter, uptime bot\n\n"
     "*Perintah:*\n"
     "/start - Menu utama\n"
     "/bf - BF Device Loop (max 10 ID)\n"
     "/bulk - Bulk Detail Scan\n"
+    "/gen - Generate Device ID\n"
     "/status - Ping, jitter, uptime\n"
     "/stop - Stop semua\n"
     "/cancel - Batal\n"
-    "/help - Bantuan\n"
-    "/broadcast - (Owner) Broadcast pesan\n\n"
+    "/help - Bantuan\n\n"
     "🔓 *Akses Publik* — wajib join channel."
 )
 
@@ -879,6 +923,7 @@ def get_user_state(user_id):
             "bulk_running": False, "bulk_stop": False,
             "bulk_msg_id": None, "bulk_done": 0,
             "bulk_valid": 0, "bulk_banned": 0, "bulk_fail": 0,
+            "gen_running": False,
         }
     return USER_STATE[user_id]
 
@@ -979,15 +1024,20 @@ def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 BF Loop", callback_data="bf_start"),
          InlineKeyboardButton("📦 Bulk Detail Scan", callback_data="bulk_start")],
-        [InlineKeyboardButton("📡 Status", callback_data="status"),
-         InlineKeyboardButton("❓ Help", callback_data="help")],
+        [InlineKeyboardButton("🆔 GenDevID", callback_data="gen_start"),
+         InlineKeyboardButton("📡 Status", callback_data="status")],
+        [InlineKeyboardButton("❓ Help", callback_data="help")],
     ])
 
 
 def status_keyboard(paused=False):
+    """Tombol Pause/Resume + HAPUS untuk BF loop."""
     if paused:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Resume", callback_data="resume")]])
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⏸ Pause", callback_data="pause")]])
+        row1 = [InlineKeyboardButton("▶️ Resume", callback_data="resume")]
+    else:
+        row1 = [InlineKeyboardButton("⏸ Pause", callback_data="pause")]
+    row2 = [InlineKeyboardButton("🗑 HAPUS", callback_data="bf_delete")]
+    return InlineKeyboardMarkup([row1, row2])
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1010,7 +1060,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _start_bf_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Helper untuk memulai conversation BF (dipakai /bf & tombol bf_start)."""
+    """Helper untuk memulai conversation BF."""
     text = (
         "📝 Kirim Device ID (satu per baris).\n"
         f"*Maksimal {MAX_BF_DEVICES} device ID.*\n"
@@ -1030,7 +1080,7 @@ async def cmd_bf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cb_bf_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback tombol 🚀 BF Loop -> masuk conversation state WAITING_DEVICE_IDS."""
+    """Callback tombol 🚀 BF Loop -> conversation."""
     q = update.callback_query
     await q.answer()
     register_user(q.from_user.id)
@@ -1051,7 +1101,128 @@ async def cmd_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown")
 
 
+@require_join
+async def cmd_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🆔 *GEN DEVICE ID*\n\n"
+        f"Masukkan jumlah Device ID yang ingin dibuat.\n"
+        f"• Minimal: 1\n"
+        f"• Maksimal: *{MAX_GEN_DEVICES}*\n\n"
+        "Contoh: `50`\n\n"
+        "Ketik /cancel untuk batal.",
+        parse_mode="Markdown")
+    return WAITING_GEN_COUNT
+
+
+async def receive_gen_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    try:
+        count = int(text)
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Masukkan angka bulat 1-9999.", parse_mode="Markdown")
+        return WAITING_GEN_COUNT
+
+    if count < 1 or count > MAX_GEN_DEVICES:
+        await update.message.reply_text(
+            f"⚠️ Jumlah harus antara *1* sampai *{MAX_GEN_DEVICES}*.\nCoba lagi.",
+            parse_mode="Markdown")
+        return WAITING_GEN_COUNT
+
+    context.user_data["gen_count"] = count
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 ANDROID (and_)", callback_data="gen_platform_and"),
+         InlineKeyboardButton("🍎 IOS (ios_)", callback_data="gen_platform_ios")],
+        [InlineKeyboardButton("❌ Batal", callback_data="gen_cancel")],
+    ])
+    await update.message.reply_text(
+        f"✅ Jumlah: *{count}*\n\nPilih platform:",
+        reply_markup=kb, parse_mode="Markdown")
+    return WAITING_GEN_PLATFORM
+
+
+async def gen_platform_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data
+    await q.answer()
+
+    if data == "gen_cancel":
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        await q.message.chat.send_message("❌ Dibatalkan.")
+        return ConversationHandler.END
+
+    if data not in ("gen_platform_and", "gen_platform_ios"):
+        return WAITING_GEN_PLATFORM
+
+    platform = "and" if data == "gen_platform_and" else "ios"
+    count = context.user_data.get("gen_count", 10)
+
+    # batasi supaya tidak berat Telegram
+    if count > 2000:
+        await q.edit_message_text(
+            f"⏳ Generating *{count}* ID `{platform}_`...\n"
+            "Ini akan memakan waktu, mohon tunggu.",
+            parse_mode="Markdown")
+    else:
+        await q.edit_message_text(
+            f"⏳ Generating *{count}* ID `{platform}_`...",
+            parse_mode="Markdown")
+
+    loop = asyncio.get_running_loop()
+    ids = await loop.run_in_executor(None, generate_device_ids, count, platform, True)
+
+    # simpan ke file
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"device_ids_{platform}_{count}_{timestamp}.txt"
+    filepath = os.path.join(OUTPUT_DIR, filename)
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(f"# Generated {count} device IDs ({platform}) - {timestamp}\n")
+            f.write(f"# Total: {len(ids)}\n\n")
+            for i, d in enumerate(ids, 1):
+                f.write(f"{i}. {d}\n")
+    except Exception as e:
+        await q.message.chat.send_message(f"❌ Gagal menyimpan file: {e}")
+        return ConversationHandler.END
+
+    await q.edit_message_text(
+        f"✅ *SELESAI*\n\n"
+        f"• Platform : `{platform}_`\n"
+        f"• Jumlah   : *{count}*\n"
+        f"• File     : `{filename}`\n\n"
+        f"File akan dikirim...",
+        parse_mode="Markdown")
+
+    try:
+        with open(filepath, "rb") as f:
+            await q.message.chat.send_document(
+                document=f, filename=filename,
+                caption=f"🆔 {count} Device ID ({platform}_)")
+    except Exception as e:
+        await q.message.chat.send_message(f"❌ Gagal kirim file: {e}")
+
+    # kirim preview 5 pertama
+    preview = "\n".join([f"`{d}`" for d in ids[:5]])
+    if len(ids) > 5:
+        preview += f"\n\n... dan {len(ids) - 5} lainnya (lihat file)"
+    else:
+        preview = "\n".join([f"`{d}`" for d in ids])
+    try:
+        await q.message.chat.send_message(
+            f"📋 *Preview (5 pertama):*\n\n{preview}",
+            parse_mode="Markdown")
+    except Exception:
+        pass
+
+    context.user_data.pop("gen_count", None)
+    return ConversationHandler.END
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("gen_count", None)
     await update.message.reply_text("❌ Dibatalkan.")
     return ConversationHandler.END
 
@@ -1236,7 +1407,7 @@ async def receive_threads(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚀 *Memulai BF Unlimited...*\n"
         f"• Total ID : {len(s['device_ids'])}\n"
         f"• Threads  : {t}\n\n"
-        f"⏳ Loop berjalan terus sampai /stop.",
+        f"⏳ Loop berjalan terus sampai /stop atau tombol HAPUS.",
         parse_mode="Markdown")
     task = asyncio.create_task(run_bf_loop(update, context, s))
     s["task"] = task
@@ -1334,8 +1505,12 @@ async def run_bf_loop(update, context, state):
                       f"• Total Loop : {state['loop']}\n"
                       f"• ✅ Success : {state['success']}\n"
                       f"• ❌ Fail    : {state['fail']}\n"
-                      f"• ⏱️ Elapsed : {el:.1f}s"),
-                parse_mode="Markdown")
+                      f"• ⏱️ Elapsed : {el:.1f}s\n\n"
+                      f"_Pesan ini bisa dihapus dengan tombol 🗑 HAPUS._"),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 HAPUS", callback_data="bf_delete")]
+                ]))
         except Exception:
             pass
 
@@ -1533,9 +1708,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_join_prompt(q)
         return
 
-    # NOTE: bf_start TIDAK ditangani di sini.
-    # Sudah ditangani oleh ConversationHandler (cb_bf_start).
-
     if data == "bulk_start":
         await q.message.reply_text(
             "📦 *BULK DETAIL SCAN*\n\n"
@@ -1543,6 +1715,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Max *{MAX_BULK_DEVICES}* device\n"
             "• Hasil: level, skin_count, hero_count, rank\n\n"
             "⚡ File langsung di-scan otomatis.",
+            parse_mode="Markdown")
+
+    elif data == "gen_start":
+        await q.message.reply_text(
+            "🆔 *GEN DEVICE ID*\n\n"
+            f"Masukkan jumlah Device ID (1-{MAX_GEN_DEVICES}).\n\n"
+            "Contoh: `100`\n\n"
+            "Ketik /cancel untuk batal.",
             parse_mode="Markdown")
 
     elif data == "status":
@@ -1599,6 +1779,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("▶️ Resumed")
         else:
             await q.answer("Tidak ada yang dipause", show_alert=True)
+
+    elif data == "bf_delete":
+        # HAPUS: stop BF + hapus pesan progress
+        s["stop_flag"] = True
+        s["pause_flag"] = False
+        s["running"] = False
+        task = s.get("task")
+        if task and not task.done():
+            task.cancel()
+        try:
+            await q.message.delete()
+        except Exception:
+            try:
+                await context.bot.delete_message(
+                    chat_id=q.message.chat_id, message_id=q.message.message_id)
+            except Exception:
+                pass
+        try:
+            await q.answer("🗑 Progress BF dihapus.", show_alert=False)
+        except Exception:
+            pass
 
     elif data == "help":
         await q.message.reply_text(HELP_TEXT, parse_mode="Markdown")
@@ -1706,12 +1907,12 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("🤖 MLBB COMBINED BOT (BF Loop + Bulk Scan + Status)")
+    print("🤖 MLBB COMBINED BOT (BF Loop + Bulk Scan + GenDevID + Status)")
     print("=" * 60)
     print(f"Token  : {BOT_TOKEN[:15]}...{BOT_TOKEN[-5:]}")
     print(f"Owner  : {OWNER_ID}")
     print(f"Mode   : PUBLIC")
-    print(f"Fitur  : BF Loop (max 10) | Bulk Scan | Status | Broadcast")
+    print(f"Fitur  : BF Loop (max 10) | Bulk Scan | GenDevID | Status | Broadcast")
     print("=" * 60)
 
     try:
@@ -1720,7 +1921,7 @@ def main():
         print(f"❌ Build gagal: {e}")
         sys.exit(1)
 
-    # ── Conversation BF (dengan entry point command + tombol) ──
+    # ── Conversation BF ──
     conv_bf = ConversationHandler(
         entry_points=[
             CommandHandler("bf", cmd_bf),
@@ -1732,6 +1933,26 @@ def main():
             ],
             WAITING_THREADS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_threads)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_user=True, per_chat=True,
+    )
+
+    # ── Conversation GenDevID ──
+    conv_gen = ConversationHandler(
+        entry_points=[
+            CommandHandler("gen", cmd_gen),
+            CallbackQueryHandler(
+                lambda u, c: receive_gen_count_start_from_cb(u, c),
+                pattern="^gen_start$"),
+        ],
+        states={
+            WAITING_GEN_COUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_gen_count)
+            ],
+            WAITING_GEN_PLATFORM: [
+                CallbackQueryHandler(gen_platform_handler, pattern="^gen_")
             ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
@@ -1759,15 +1980,16 @@ def main():
     app.add_handler(CommandHandler("bulk", cmd_bulk))
 
     app.add_handler(conv_bf)
+    app.add_handler(conv_gen)
     app.add_handler(conv_broadcast)
 
     # Bulk file handler
     app.add_handler(MessageHandler(filters.Document.ALL, handle_bulk_file))
 
-    # Callback button handler (untuk bulk_start, status, pause, resume, help, verify_join)
+    # Callback button handler
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Debug/fallback handler (tidak balas apa-apa)
+    # Debug/fallback handler
     app.add_handler(MessageHandler(filters.ALL, debug_handler))
 
     app.add_error_handler(error_handler)
@@ -1780,6 +2002,25 @@ def main():
     except Exception as e:
         print(f"❌ Crash: {e}")
         logger.exception("crash")
+
+
+async def receive_gen_count_start_from_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk tombol GenDevID dari menu → minta jumlah."""
+    q = update.callback_query
+    await q.answer()
+    register_user(q.from_user.id)
+    if not await check_user_joined(context.bot, q.from_user.id):
+        await send_join_prompt(q)
+        return ConversationHandler.END
+    await q.message.reply_text(
+        "🆔 *GEN DEVICE ID*\n\n"
+        f"Masukkan jumlah Device ID yang ingin dibuat.\n"
+        f"• Minimal: 1\n"
+        f"• Maksimal: *{MAX_GEN_DEVICES}*\n\n"
+        "Contoh: `100`\n\n"
+        "Ketik /cancel untuk batal.",
+        parse_mode="Markdown")
+    return WAITING_GEN_COUNT
 
 
 if __name__ == "__main__":
